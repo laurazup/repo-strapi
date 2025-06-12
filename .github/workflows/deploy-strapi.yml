@@ -37,7 +37,6 @@ jobs:
         # Passamos as chaves de produção como dummy, pois o build não precisa delas, mas o script pode exigir
         run: |
           NODE_ENV=production npm run build
-          # Opcional: remover dependências de desenvolvimento para um zip menor
           npm prune --production
 
       # Passo 4: Criar o arquivo .zip para deploy
