@@ -1,0 +1,85 @@
+# Nome do Workflow
+name: Build and Deploy Strapi to Elastic Beanstalk
+
+# Gatilho (Trigger): Roda em todo merge/commit para a branch 'main'
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: # Permite acionar manualmente também
+
+# Permissões para autenticação segura na AWS via OIDC
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+    environment: production # Opcional: para usar segredos de ambiente do GitHub
+
+    steps:
+      # Passo 1: Fazer o checkout do código do repositório
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Passo 2: Configurar o ambiente Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18' # Use a mesma versão do seu Elastic Beanstalk
+          cache: 'npm'
+
+      # Passo 3: Instalar dependências e fazer o build da aplicação
+      - name: Install dependencies
+        run: npm ci
+      - name: Build Strapi application
+        # Passamos as chaves de produção como dummy, pois o build não precisa delas, mas o script pode exigir
+        run: |
+          NODE_ENV=production npm run build
+          # Opcional: remover dependências de desenvolvimento para um zip menor
+          npm prune --production
+
+      # Passo 4: Criar o arquivo .zip para deploy
+      - name: Create deployment package
+        # Empacota apenas o necessário para produção
+        run: zip -r deploy.zip dist/ config/ package.json package-lock.json node_modules/ .env.example .npmrc
+
+      # Passo 5: Configurar as credenciais da AWS de forma segura
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # ARN do Papel IAM que o GitHub Actions irá assumir
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }} # Ex: us-east-1
+
+      # Passo 6: Fazer o upload do pacote para o S3
+      - name: Upload package to S3
+        run: |
+          export BUCKET_NAME=${{ secrets.AWS_S3_BUCKET }}
+          export ARTIFACT_NAME="strapi-app-${{ github.sha }}.zip"
+          aws s3 cp deploy.zip s3://$BUCKET_NAME/$ARTIFACT_NAME
+
+      # Passo 7: Criar uma nova versão da aplicação no Elastic Beanstalk
+      - name: Create new Elastic Beanstalk version
+        run: |
+          export BUCKET_NAME=${{ secrets.AWS_S3_BUCKET }}
+          export ARTIFACT_NAME="strapi-app-${{ github.sha }}.zip"
+          export VERSION_LABEL="v-${{ github.sha }}"
+          export EB_APP_NAME=${{ secrets.AWS_EB_APP_NAME }}
+          aws elasticbeanstalk create-application-version \
+            --application-name "$EB_APP_NAME" \
+            --version-label "$VERSION_LABEL" \
+            --source-bundle S3Bucket="$BUCKET_NAME",S3Key="$ARTIFACT_NAME" \
+            --description "Commit ${{ github.sha }}"
+
+      # Passo 8: Acionar o deploy da nova versão no ambiente
+      - name: Deploy new version to environment
+        run: |
+          export VERSION_LABEL="v-${{ github.sha }}"
+          export EB_APP_NAME=${{ secrets.AWS_EB_APP_NAME }}
+          export EB_ENV_NAME=${{ secrets.AWS_EB_ENV_NAME }}
+          aws elasticbeanstalk update-environment \
+            --application-name "$EB_APP_NAME" \
+            --environment-name "$EB_ENV_NAME" \
+            --version-label "$VERSION_LABEL"
